@@ -126,8 +126,8 @@ class AttentionBlock(torch.nn.Module):
             #
             # XFormers Implementation
             #
-            
-            q, k, v = map(lambda t: rearrange(t, 'b h (n d) -> b h n d', h = self.n_heads), (q, k, v))
+
+            q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b n h d', h = self.n_heads), (q, k, v))
             y = xops.memory_efficient_attention(q, k, v, p = self.att_dropout if self.training else 0.0, attn_bias = mask)
             y = rearrange(y, 'b n h d -> b n (h d)')
 
