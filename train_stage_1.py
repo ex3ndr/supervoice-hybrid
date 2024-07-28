@@ -21,7 +21,7 @@ from accelerate.utils import set_seed
 from torch.profiler import profile, record_function, ProfilerActivity
 
 # Local
-from supervoice_hybrid import SupervoceHybridStage1, UnitTextTokenizer, SentencePieceTextTokenizer
+from supervoice_hybrid import SupervoceHybridStage1, SentencePieceTextTokenizer
 from train.dataset import load_sampler, create_async_loader
 
 # Experiment
