@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat, reduce, pack, unpack
 from torch.cuda.amp import autocast
 from .tensors import RMSNorm
-# from flash_attn import flash_attn_func
+import xformers.ops as xops
 from torch.profiler import record_function
 
 class Transformer(nn.Module):
@@ -45,8 +45,7 @@ class Transformer(nn.Module):
         # Output normalization
         self.output_norm = RMSNorm(n_dim)
 
-    def forward(self, x, mask = None, casual = False):
-        batch, seq_len, *_ = x.shape
+    def forward(self, x, mask = None):
 
         # Run through attention blocks
         connections = []
@@ -60,7 +59,7 @@ class Transformer(nn.Module):
 
             # Attention
             with record_function("attention"):
-                x = self.layers[i](x, mask = mask, casual = casual)
+                x = self.layers[i](x, mask = mask)
 
             # Skip connection
             if i <= self.n_layers // 2:
@@ -110,10 +109,10 @@ class AttentionBlock(torch.nn.Module):
 
         self.mlp_output_dropout = nn.Dropout(ffn_dropout)
 
-    def forward(self, x, mask = None, casual = False):
+    def forward(self, x, mask = None):
 
         with record_function("attention:pre"):
-            B, T, C = x.size() # batch size, sequence length, context width
+            # B, T, C = x.size() # batch size, sequence length, context width
 
             # Residual
             residual = x
@@ -124,20 +123,22 @@ class AttentionBlock(torch.nn.Module):
             # Calculation Q/K/V for each head
             q, k, v = self.attention(y).chunk(3, dim = -1)
 
+            #
+            # XFormers Implementation
+            #
+
+            y = xops.memory_efficient_attention(q, k, v, p = self.att_dropout if self.training else 0.0, attn_bias = mask)
+
+            #
+            # SDPA implementation
+            #
+
             # Reshape for head-first attention
-            q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.n_heads), (q, k, v))
-
-            # Prepare mask
-            # mask = None
-            # if padding_mask is not None:
-            #     mask = rearrange(mask, "b j -> b 1 1 j")
-            #     mask = mask.expand(-1, self.d_heads, q_len, -1)
-            
+            # q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.n_heads), (q, k, v))
             # Run through attention
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.att_dropout if self.training else 0.0, attn_mask = mask, is_causal = casual)
-
+            # y = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.att_dropout if self.training else 0.0, attn_mask = mask, is_causal = casual)
             # Reshape back
-            y = rearrange(y, 'b h n d -> b n (h d)')
+            # y = rearrange(y, 'b h n d -> b n (h d)')
 
             # Output
             y = self.attention_output(y)

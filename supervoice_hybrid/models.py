@@ -1,5 +1,6 @@
 import torch
 from .transformer import Transformer
+from xformers.ops import fmha
 
 class SupervoceHybridStage1(torch.nn.Module):
     def __init__(self):
@@ -20,9 +21,10 @@ class SupervoceHybridStage1(torch.nn.Module):
         torch.nn.init.normal_(self.text_embedding.weight, mean=0.0, std=0.02)
 
         # Audio embedding
-        self.audio_embedding = torch.nn.ModuleList([torch.nn.Embedding(1024, self.n_dim) for _ in range(8)])
-        for embedding in self.audio_embedding:
-            torch.nn.init.normal_(embedding.weight, mean=0.0, std=0.02)
+        self.audio_embedding = torch.nn.Embedding(1024 + 1, self.n_dim)
+
+        # Input projection
+        self.input_projection = torch.nn.Linear(self.n_dim * 2, self.n_dim, bias=False)
 
         # Transformer
         self.transformer = Transformer(
@@ -35,61 +37,92 @@ class SupervoceHybridStage1(torch.nn.Module):
             ffn_dropout = 0.1
         )
         
-        # Input projection
-        self.input_projection = torch.nn.Linear(self.n_dim * 2, self.n_dim, bias=False)
+        # Prediction
+        self.prediction = torch.nn.Linear(self.n_dim, 1024)
+        torch.nn.init.normal_(self.prediction.weight, mean=0.0, std=0.02)
+        torch.nn.init.zeros_(self.prediction.bias)
 
 
-    def forward(self, *, condition_text, condition_audio, target = None, duration = None):
+    def forward(self, *, condition_text, condition_audio, duration, target = None):
+        device = condition_text[0].device
         
-        # Check batch size
+        #
+        # Check shapes
+        #
+
         B = len(condition_text)
         assert len(condition_audio) == B
-
-        # Durations
-        if duration is not None:
-            assert target is None
-            assert len(duration) == B
-        else:
-            assert target is not None
+        assert len(duration) == B
+        if target is not None:
             assert len(target) == B
-            duration = [t.shape[0] for t in target]
+            assert all(t.shape[0] + c.shape[0] == d for t, d, c in zip(target, duration, condition_audio))
+        for i in range(B):
+            assert len(condition_text[i].shape) == 1, condition_text[i].shape
+            assert len(condition_audio[i].shape) == 1, condition_audio[i].shape
+            assert condition_text[i].shape[0] <= duration[i]
+            assert condition_audio[i].shape[0] <= duration[i]
+            if target is not None:
+                assert target[i].shape[0] + condition_audio[i].shape[0] == duration[i]
 
-        # Concatenate inputs
+        #
+        # Prepare inputs
+        #
+
+        # Pad inputs
         inputs_text = []
         inputs_audio = []
         inputs_positional = []
         for i in range(B):
             d = duration[i]
-            inputs_text.append(torch.pad(condition_text[i] + 1, (0, condition_text[i].shape[0] - d), "constant", 0))
-            inputs_audio.append(torch.pad(condition_audio[i][0] + 1, (0, condition_audio[i][0].shape[0] - d), "constant", 0))
-            inputs_positional.append(torch.arange(d).to(t.device, non_blocking=True))
+            inputs_text.append(torch.nn.functional.pad(condition_text[i], (0, d - condition_text[i].shape[0]), "constant", 0))
+            inputs_audio.append(torch.nn.functional.pad(condition_audio[i] + 1, (0, d - condition_audio[i].shape[0]), "constant", 0))
+            inputs_positional.append(torch.arange(d).to(device, non_blocking=True))
+
+        # Cat everything
         inputs_text = torch.cat(inputs_text)
         inputs_audio = torch.cat(inputs_audio)
+
+        # Embeddings
+        inputs_text = self.text_embedding(inputs_text)
+        inputs_audio = self.audio_embedding(inputs_audio)
+
+        # Positional embeddings
         inputs_positional = torch.cat(inputs_positional)
         inputs_text += self.positional_embedding_text(inputs_positional)
         inputs_audio += self.positional_embedding_audio(inputs_positional)
-        inputs = torch.stack([inputs_text, inputs_audio], dim=1)
+
+        # Input projection
+        inputs = torch.cat([inputs_text, inputs_audio], dim=-1)
         inputs = self.input_projection(inputs)
 
+        #
         # Run transformer
-        x = self.transformer(inputs)
+        #
+        mask = fmha.BlockDiagonalMask.from_seqlens(duration)
+        x = self.transformer(inputs.unsqueeze(0), mask = mask).squeeze(0)
 
-            # t_x = self.text_embedding(torch.pad(condition_text[i] + 1, (0, condition_text[i].shape[0] - d), "constant", 0))
-            # t_x = t_x + self.positional_embedding_text(torch.arange(d).to(t.device, non_blocking=True))
+        #
+        # Predict
+        #
 
-            # # Audio embedding
-            # a_x = self.audio_embedding[0](torch.pad(condition_audio[i][0] + 1, (0, condition_audio[i][0].shape[0] - d), "constant", 0))
-            # # for j in range(1, 8):
-            # #     a_x = a_x + self.audio_embedding[j](torch.pad(condition_audio[i][j] + 1, (0, condition_audio[i][j].shape[0] - d), "constant", 0))
-            # a_x = a_x + self.positional_embedding_audio(torch.arange(d).to(t.device, non_blocking=True))
+        x = self.prediction(x)
 
-            # # Condition
-            # cond = t_x + a_x
+        #
+        # Split predictions
+        #
 
-            # # Append
-            # inputs.append(cond)
+        predicted = []
+        offset = 0
+        for i in range(B):
+            predicted.append(x[offset + (duration[i] - target[i].shape[0]): offset + duration[i]])
+            offset += duration[i]
 
-        # Run transformer
-        # x = self.transformer(inputs)
+        #
+        # Loss
+        #
 
-        return x
+        if target is not None:
+            loss = torch.nn.functional.cross_entropy(torch.cat(predicted), torch.cat(target))
+            return predicted, loss
+        else:
+            return predicted

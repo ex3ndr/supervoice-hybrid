@@ -21,7 +21,7 @@ from accelerate.utils import set_seed
 from torch.profiler import profile, record_function, ProfilerActivity
 
 # Local
-from supervoice_hybrid import SupervoceHybridStage1, UnitTextTokenizer
+from supervoice_hybrid import SupervoceHybridStage1, UnitTextTokenizer, SentencePieceTextTokenizer
 from train.dataset import load_sampler, create_async_loader
 
 # Experiment
@@ -50,7 +50,8 @@ train_watch_every = 1000
 #
 
 def create_sampler():
-    tokenizer = UnitTextTokenizer()
+    # tokenizer = UnitTextTokenizer()
+    tokenizer = SentencePieceTextTokenizer("./tokenizer_text.model")
     train_sampler = load_sampler("./external_datasets/libriheavy/libriheavy_cuts_small.jsonl.gz", "./external_datasets/libriheavy-encodec/", train_batch_size, tokenizer)
     # train_sampler = load_sampler("./external_datasets/libriheavy/libriheavy_cuts_medium.jsonl.gz", "./external_datasets/libriheavy-medium-encodec/", train_batch_size, tokenizer)
     # train_sampler = load_sampler("./external_datasets/libriheavy/libriheavy_cuts_large.jsonl.gz", "./external_datasets/libriheavy-large-encodec/", train_batch_size, tokenizer)
@@ -59,23 +60,36 @@ def create_sampler():
 def create_model():
     return SupervoceHybridStage1()
 
-def do_train(inputs):
+def do_train(accelerator, model, inputs):
+    device = accelerator.device
     audio, text = inputs
     
-    # Split audio
-    texts = []
-    audios = []
+    # Reshape inputs
+    condition_text = []
+    condition_audio = []
+    targets = []
+    durations = []
     for B in range(len(audio)):
-        a = audio[B].squeeze(0)
+        a = audio[B].squeeze(0)[0]
         t = text[B].squeeze(0)
-        audios.append(a[0].to(device, non_blocking=True))
-        texts.append(t.to(device, non_blocking=True))
+        
+        # Calculate split
+        min_duration = 0
+        max_duration = a.shape[0] // 3
+        audio_split = random.randint(min_duration, max_duration)
+
+        # Append
+        condition_text.append(t.to(device, non_blocking=True))
+        condition_audio.append(a[:audio_split].to(device, non_blocking=True))
+        targets.append(a[audio_split:].to(device, non_blocking=True))
+        durations.append(a.shape[0])
 
     # Forward
     _, loss = model(
-        text = texts,
-        audio = audios,
-        loss = True
+        condition_text = condition_text,
+        condition_audio = condition_audio,
+        duration = durations,
+        target = targets
     )
 
     return loss
@@ -90,6 +104,7 @@ def main():
     train_grad_accum_every = train_target_batch_size
     if torch.cuda.is_available() and torch.cuda.device_count() > 1:
         train_grad_accum_every = math.ceil(train_target_batch_size / torch.cuda.device_count())
+    print(f"Running with gradient accumulation every {train_grad_accum_every}")
 
     # Prepare accelerator
     ddp_kwargs = DistributedDataParallelKwargs()
@@ -131,7 +146,7 @@ def main():
         run_id = checkpoint['run_id']
     
     # Accelerate
-    model = accelerator.prepare(model)
+    model, optim = accelerator.prepare(model, optim)
     hps = {
         "train_lr_start": train_lr_start, 
         "train_lr_max": train_lr_max, 
@@ -199,7 +214,7 @@ def main():
                 # Do train
                 with record_function("forward"):
                     with accelerator.autocast():
-                        loss = do_train(inputs)
+                        loss = do_train(accelerator, model, inputs)
                         loss = loss / train_grad_accum_every # Rescale loss
                         
                 # Backprop
