@@ -30,12 +30,44 @@ class AdaptiveRMSNorm(torch.nn.Module):
         torch.nn.init.zeros_(self.to_beta.weight)
         torch.nn.init.zeros_(self.to_beta.bias)
 
-    def forward(self, x, *, cond):
+    def forward(self, x, *, condition):
         normed = F.normalize(x, dim = -1, eps = 1e-05) * self.scale
-        gamma, beta = self.to_gamma(cond), self.to_beta(cond)
+        gamma, beta = self.to_gamma(condition), self.to_beta(condition)
         gamma, beta = map(lambda t: rearrange(t, 'b d -> b 1 d'), (gamma, beta))
 
         return normed * gamma + beta
+
+class ConvPositionEmbed(torch.nn.Module):
+    def __init__(self, n_dim, kernel_size):
+        super().__init__()
+        self.dw_conv1d = torch.nn.Sequential(nn.Conv1d(n_dim, n_dim, kernel_size, groups = n_dim, padding = kernel_size // 2), nn.GELU())
+
+    def forward(self, x, mask = None):
+
+        if mask is not None:
+            mask = mask[..., None]
+            x = x.masked_fill(~mask, 0.)
+
+        x = rearrange(x, 'b n c -> b c n')
+        x = self.dw_conv1d(x)
+        out = rearrange(x, 'b c n -> b n c')
+
+        if mask is not None:
+            out = out.masked_fill(~mask, 0.)
+
+        return out
+
+class LearnedSinusoidalPosEmb(torch.nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        half_dim = dim // 2
+        self.weights = torch.nn.Parameter(torch.randn(half_dim))
+
+    def forward(self, x):
+        x = rearrange(x, 'b -> b 1')
+        freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi
+        fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
+        return fouriered
 
 def probability_binary_mask(shape, true_prob, device):
     return torch.zeros(shape, device = device).float().uniform_(0, 1) < true_prob
@@ -126,3 +158,7 @@ def join_tensors(tensors, sep = None):
     
     return res
     
+def get_slopes_power_of_2(n_heads):
+    start = (2**(-2**-(math.log2(n_heads)-3)))
+    ratio = start
+    return torch.tensor([start*ratio**i for i in range(n_heads)], dtype=torch.float32)

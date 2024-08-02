@@ -4,7 +4,7 @@ import math
 import random
 import torch
 
-def load_sampler(index, dir, batch_size, tokenizer = None):
+def load_encodec_sampler(index, dir, batch_size, tokenizer = None):
 
     # Load ids
     ids = []

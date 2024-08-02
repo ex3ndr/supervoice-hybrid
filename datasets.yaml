@@ -1,0 +1,8 @@
+datasets:
+  - librilight
+  - librilight-aligned
+  - librilight-aligned@medium
+  - librilight-aligned@large
+  - librilight-encodec
+  - librilight-encodec@medium
+  - librilight-encodec@large

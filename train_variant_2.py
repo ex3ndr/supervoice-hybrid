@@ -22,16 +22,16 @@ from torch.profiler import profile, record_function, ProfilerActivity
 
 # Local
 from supervoice_hybrid import SupervoceHybridStage1, SentencePieceTextTokenizer
-from train.dataset import load_sampler, create_async_loader
+from train.dataset import load_encodec_sampler, create_async_loader
 
 # Experiment
-train_experiment = "exp-1"
-train_project="supervoice-hybrid"
+train_experiment = "exp-2"
+train_project="supervoice-e2"
 train_auto_resume = True
 
 # Training schedule and parameters
-train_target_batch_size = 32
-train_batch_size = 6
+train_target_batch_size = 16
+train_batch_size = 12
 train_mixed_precision = "fp16" # "bf16" or "fp16" or None
 train_clip_grad_norm = 1 # Common reproductions are using 100 or 1
 train_lr_start = 1e-12
@@ -52,9 +52,9 @@ train_watch_every = 1000
 def create_sampler():
     # tokenizer = UnitTextTokenizer()
     tokenizer = SentencePieceTextTokenizer("./tokenizer_text.model")
-    train_sampler = load_sampler("./external_datasets/libriheavy/libriheavy_cuts_small.jsonl.gz", "./external_datasets/libriheavy-encodec/", train_batch_size, tokenizer)
-    # train_sampler = load_sampler("./external_datasets/libriheavy/libriheavy_cuts_medium.jsonl.gz", "./external_datasets/libriheavy-medium-encodec/", train_batch_size, tokenizer)
-    # train_sampler = load_sampler("./external_datasets/libriheavy/libriheavy_cuts_large.jsonl.gz", "./external_datasets/libriheavy-large-encodec/", train_batch_size, tokenizer)
+    # train_sampler = load_encodec_sampler("./external_datasets/libriheavy/libriheavy_cuts_small.jsonl.gz", "./external_datasets/libriheavy-encodec/", train_batch_size, tokenizer)
+    # train_sampler = load_encodec_sampler("./external_datasets/libriheavy/libriheavy_cuts_medium.jsonl.gz", "./external_datasets/libriheavy-medium-encodec/", train_batch_size, tokenizer)
+    train_sampler = load_encodec_sampler("./external_datasets/libriheavy/libriheavy_cuts_large.jsonl.gz", "./external_datasets/libriheavy-large-encodec/", train_batch_size, tokenizer)
     return train_sampler
 
 def create_model():
