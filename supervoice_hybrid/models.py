@@ -172,7 +172,6 @@ class SupervoiceVariant2(torch.nn.Module):
             n_dim_ffn = self.n_dim * 4,
             att_dropout = 0,
             ffn_dropout = 0.1,
-            adaptive = True,
             enable_skip_connections = True
         )
 
@@ -211,7 +210,6 @@ class SupervoiceVariant2(torch.nn.Module):
             if target is not None:
                 assert target[i].shape[0] == intervals[i][1] - intervals[i][0]
                 assert target[i].shape[1] == config.audio.n_mels
-            
 
         # Prepare inputs
         inputs_text = []
@@ -244,11 +242,20 @@ class SupervoiceVariant2(torch.nn.Module):
         # Time embeddings
         times = self.time_embedding(times)
 
+        # Merge time embeddings
+        inputs_timed = []
+        offset = 0
+        for i in range(B):
+            d = durations[i]
+            inputs_timed.append(torch.cat([inputs[offset: offset + d], times[i].unsqueeze(0)], dim=0))
+            offset += d
+        inputs = torch.cat(inputs_timed)
+
         # Transformer
         attention_mask = None
         if len(durations) > 1: # Disable mask for speed if not batched
-            attention_mask = fmha.BlockDiagonalMask.from_seqlens(durations)
-        x = self.transformer(inputs.unsqueeze(0), mask = attention_mask, condition = times.unsqueeze(0)).squeeze(0)
+            attention_mask = fmha.BlockDiagonalMask.from_seqlens([i + 1 for i in durations])
+        x = self.transformer(inputs.unsqueeze(0), mask = attention_mask).squeeze(0)
         
         # Predict
         x = self.prediction(x)
@@ -257,12 +264,14 @@ class SupervoiceVariant2(torch.nn.Module):
         preds = []
         offset = 0
         for i in range(B):
-            preds.append(x[offset + intervals[0]: offset + intervals[1]])
-            offset += durations[i]
+            preds.append(x[offset + intervals[i][0]: offset + intervals[i][1]])
+            offset += durations[i] + 1 # +1 for time embedding
 
         # Compute loss
         if target is not None:
-            loss = torch.nn.functional.mse_loss(torch.cat(preds), target)
+            target = torch.cat(target, dim = 0)
+            predd_cat = torch.cat(preds, dim = 0)
+            loss = torch.nn.functional.mse_loss(predd_cat, target)
             loss = loss / target.shape[0] # Normalize by number of frames
             return preds, loss
         

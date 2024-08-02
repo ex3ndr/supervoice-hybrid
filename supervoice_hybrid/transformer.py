@@ -55,7 +55,7 @@ class Transformer(nn.Module):
         for i in range(self.n_layers):
 
             # Skip connection
-            if self.n_layers - (self.n_layers // 2) < i and self.enable_skip_connections:
+            if self.n_layers - (self.n_layers // 2) <= i and self.enable_skip_connections:
                 s = connections.pop()
                 x = torch.cat([x, s], dim = -1)
                 x = self.skip_combiners[i - (self.n_layers // 2)](x)
