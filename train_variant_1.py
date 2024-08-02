@@ -21,12 +21,12 @@ from accelerate.utils import set_seed
 from torch.profiler import profile, record_function, ProfilerActivity
 
 # Local
-from supervoice_hybrid import SupervoceHybridStage1, SentencePieceTextTokenizer
+from supervoice_hybrid import SupervoceVariant1, SentencePieceTextTokenizer
 from train.dataset import load_encodec_sampler, create_async_loader
 
 # Experiment
-train_experiment = "exp-2"
-train_project="supervoice-hybrid"
+train_experiment = "var1-2"
+train_project="hybrid-var1"
 train_auto_resume = True
 
 # Training schedule and parameters
@@ -50,7 +50,6 @@ train_watch_every = 1000
 #
 
 def create_sampler():
-    # tokenizer = UnitTextTokenizer()
     tokenizer = SentencePieceTextTokenizer("./tokenizer_text.model")
     # train_sampler = load_encodec_sampler("./external_datasets/libriheavy/libriheavy_cuts_small.jsonl.gz", "./external_datasets/libriheavy-encodec/", train_batch_size, tokenizer)
     # train_sampler = load_encodec_sampler("./external_datasets/libriheavy/libriheavy_cuts_medium.jsonl.gz", "./external_datasets/libriheavy-medium-encodec/", train_batch_size, tokenizer)
@@ -58,7 +57,7 @@ def create_sampler():
     return train_sampler
 
 def create_model():
-    return SupervoceHybridStage1()
+    return SupervoceVariant1()
 
 def do_train(accelerator, model, inputs):
     device = accelerator.device

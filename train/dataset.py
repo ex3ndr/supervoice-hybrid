@@ -53,6 +53,56 @@ def load_encodec_sampler(index, dir, batch_size, tokenizer = None):
     
     return sample
 
+def load_spec_sampler(index, dir, batch_size, tokenizer = None):
+
+    # Load ids
+    ids = []
+    with gzip.open(index, "r") as f:
+        for line in f:
+            cut = json.loads(line)
+            id = cut["supervisions"][0]["id"]
+            if id.startswith("small/"):
+                id = id[len("small/"):]
+            if id.startswith("medium/"):
+                id = id[len("medium/"):]
+            if id.startswith("large/"):
+                id = id[len("large/"):]
+            ids.append(id)
+
+    def sample():
+        loaded = 0
+        res_encoded = []
+        res_text = []
+        while loaded < batch_size:
+            # Pick ID
+            id = random.choice(ids)
+
+            try:
+
+                # Load text
+                with open(dir + id + ".txt", 'r') as file:
+                    text = file.read()
+                    if tokenizer is not None:
+                        text = tokenizer.encode(text) if random.random() < 0.3 else tokenizer.encode_sample(text) # 30% chance of sampling optimal
+                        if text.shape[0] == 0:
+                            raise Exception("Empty file")
+
+                # Load encoded
+                encoded = torch.load(dir + id + ".pt", map_location = "cpu")
+
+                # Append
+                res_text.append(text)
+                res_encoded.append(encoded)
+                loaded += 1
+            except Exception as e:
+                print(e)
+                print("Invalid file: " + id)
+                pass
+        
+        return res_encoded, res_text
+    
+    return sample
+
 def create_async_loader(sampler, num_workers = 1):
 
     # Dataset

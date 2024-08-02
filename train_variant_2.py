@@ -21,12 +21,13 @@ from accelerate.utils import set_seed
 from torch.profiler import profile, record_function, ProfilerActivity
 
 # Local
-from supervoice_hybrid import SupervoceHybridStage1, SentencePieceTextTokenizer
-from train.dataset import load_encodec_sampler, create_async_loader
+from supervoice_hybrid import SupervoiceVariant2, SentencePieceTextTokenizer
+from supervoice_hybrid.config import config
+from train.dataset import load_spec_sampler, create_async_loader
 
 # Experiment
-train_experiment = "exp-2"
-train_project="supervoice-e2"
+train_experiment = "var2-1"
+train_project="hybrid-var2"
 train_auto_resume = True
 
 # Training schedule and parameters
@@ -38,6 +39,7 @@ train_lr_start = 1e-12
 train_lr_max = 5e-4
 train_steps = 600000
 train_warmup_steps = 32000 # I am using faster warmup - it is more natural for me after working on voicebox
+train_sigma = 1e-5
 
 # Utilities
 train_loader_workers = 32
@@ -52,44 +54,68 @@ train_watch_every = 1000
 def create_sampler():
     # tokenizer = UnitTextTokenizer()
     tokenizer = SentencePieceTextTokenizer("./tokenizer_text.model")
-    # train_sampler = load_encodec_sampler("./external_datasets/libriheavy/libriheavy_cuts_small.jsonl.gz", "./external_datasets/libriheavy-encodec/", train_batch_size, tokenizer)
-    # train_sampler = load_encodec_sampler("./external_datasets/libriheavy/libriheavy_cuts_medium.jsonl.gz", "./external_datasets/libriheavy-medium-encodec/", train_batch_size, tokenizer)
-    train_sampler = load_encodec_sampler("./external_datasets/libriheavy/libriheavy_cuts_large.jsonl.gz", "./external_datasets/libriheavy-large-encodec/", train_batch_size, tokenizer)
+    train_sampler = load_spec_sampler("./external_datasets/libriheavy/libriheavy_cuts_small.jsonl.gz", "./processed_datasets/librilight/", train_batch_size, tokenizer)
+    # train_sampler = load_spec_sampler("./external_datasets/libriheavy/libriheavy_cuts_medium.jsonl.gz", "./processed_datasets/librilight-medium/", train_batch_size, tokenizer)
+    # train_sampler = load_spec_sampler("./external_datasets/libriheavy/libriheavy_cuts_large.jsonl.gz", "./processed_datasets/librilight-large/", train_batch_size, tokenizer)
     return train_sampler
 
 def create_model():
-    return SupervoceHybridStage1()
+    return SupervoiceVariant2()
 
 def do_train(accelerator, model, inputs):
     device = accelerator.device
-    audio, text = inputs
-    
-    # Reshape inputs
+    audio_r, text_r = inputs
+
+    # Preprocessing
     condition_text = []
     condition_audio = []
-    targets = []
-    durations = []
-    for B in range(len(audio)):
-        a = audio[B].squeeze(0)[0]
-        t = text[B].squeeze(0)
+    noisy_audio = []
+    intervals = []
+    times = []
+    target = []
+    for i in range(train_batch_size):
+        audio = audio_r[i].squeeze(0).T
+        text = text_r[i].squeeze(0)
+        print(audio.shape, text.shape)
+
+        # Normalize audio
+        audio = (audio - config.audio.norm_mean) / config.audio.norm_std
+
+        # Prepare time and noisy data
+        time = random.uniform(0, 1)
+        noise = torch.randn_like(audio)
+        noisy = (1 - (1 - train_sigma) * time) * noise + time * audio
+        target_flow = audio - (1 - train_sigma) * noise
+
+        # Calculate interval
+        interval_start = random.randint(0, math.floor(audio.shape[0] * 0.3))
+        interval_end = random.randint(interval_start + math.floor(audio.shape[0] * 0.7), audio.shape[0])
         
-        # Calculate split
-        min_duration = 0
-        max_duration = a.shape[0] // 3
-        audio_split = random.randint(min_duration, max_duration)
+        # 20% chance of non-conditional
+        if random.random() < 0.2:
+            interval_start = 0
+            interval_end = audio.shape[0]
+            text = torch.zeros(1).long()
+
+        # Apply mask
+        audio[interval_start:interval_end,:] = 0
 
         # Append
-        condition_text.append(t.to(device, non_blocking=True))
-        condition_audio.append(a[:audio_split].to(device, non_blocking=True))
-        targets.append(a[audio_split:].to(device, non_blocking=True))
-        durations.append(a.shape[0])
+        condition_text.append(text.to(device, non_blocking=True))
+        condition_audio.append(audio.to(device, non_blocking=True))
+        noisy_audio.append(noisy.to(device, non_blocking=True))
+        intervals.append([interval_start, interval_end])
+        times.append(torch.tensor(time).to(device, non_blocking=True))
+        target.append(target_flow[interval_start:interval_end,:].to(device, non_blocking=True))
 
     # Forward
     _, loss = model(
         condition_text = condition_text,
         condition_audio = condition_audio,
-        duration = durations,
-        target = targets
+        noisy_audio = noisy_audio,
+        intervals = intervals,
+        times = times,
+        target = target
     )
 
     return loss
