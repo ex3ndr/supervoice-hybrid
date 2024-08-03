@@ -38,7 +38,7 @@ train_clip_grad_norm = 1 # Common reproductions are using 100 or 1
 train_lr_start = 1e-12
 train_lr_max = 5e-4
 train_steps = 600000
-train_warmup_steps = 32000 # I am using faster warmup - it is more natural for me after working on voicebox
+train_warmup_steps = 6000 # I am using faster warmup - it is more natural for me after working on voicebox
 train_sigma = 1e-5
 
 # Utilities
@@ -54,9 +54,9 @@ train_watch_every = 1000
 def create_sampler():
     # tokenizer = UnitTextTokenizer()
     tokenizer = SentencePieceTextTokenizer("./tokenizer_text.model")
-    train_sampler = load_spec_sampler("./external_datasets/libriheavy/libriheavy_cuts_small.jsonl.gz", "./processed_datasets/librilight/", train_batch_size, tokenizer)
+    # train_sampler = load_spec_sampler("./external_datasets/libriheavy/libriheavy_cuts_small.jsonl.gz", "./processed_datasets/librilight/", train_batch_size, tokenizer)
     # train_sampler = load_spec_sampler("./external_datasets/libriheavy/libriheavy_cuts_medium.jsonl.gz", "./processed_datasets/librilight-medium/", train_batch_size, tokenizer)
-    # train_sampler = load_spec_sampler("./external_datasets/libriheavy/libriheavy_cuts_large.jsonl.gz", "./processed_datasets/librilight-large/", train_batch_size, tokenizer)
+    train_sampler = load_spec_sampler("./external_datasets/libriheavy/libriheavy_cuts_large.jsonl.gz", "./processed_datasets/librilight-large/", train_batch_size, tokenizer)
     return train_sampler
 
 def create_model():
@@ -76,7 +76,6 @@ def do_train(accelerator, model, inputs):
     for i in range(train_batch_size):
         audio = audio_r[i].squeeze(0).T
         text = text_r[i].squeeze(0)
-        print(audio.shape, text.shape)
 
         # Normalize audio
         audio = (audio - config.audio.norm_mean) / config.audio.norm_std
