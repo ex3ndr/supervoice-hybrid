@@ -357,3 +357,156 @@ class SupervoiceVariant2(torch.nn.Module):
             return outputs, loss
         
         return outputs
+
+
+class SupervoiceVariant3(torch.nn.Module):
+    def __init__(self, flow):
+        super().__init__()
+        self.flow = flow
+        self.text_embedding = torch.nn.Embedding(8 * 1024 + 1, 100)
+        torch.nn.init.normal_(self.text_embedding.weight, mean=0.0, std=0.02)
+
+    def sample(self, *, tokens, audio, interval, steps, alpha = None):
+        
+        #
+        # Prepare
+        #
+
+        # Mask out audio
+        masked_audio = audio.clone()
+        masked_audio[interval[0]: interval[1]] = 0
+
+        # Create noise
+        noise = torch.randn_like(audio)
+
+        # Create time interpolation
+        times = torch.linspace(0, 1, steps, device = audio.device)
+
+        #
+        # Solver
+        #
+
+        def solver(t, z):
+
+            # If alpha is not provided
+            if alpha is None:
+                return self.forward(
+                    condition_text = [tokens], 
+                    condition_audio = [masked_audio], 
+                    noisy_audio = [z], 
+                    times = [t],
+                )[0]
+
+            # If alpha is provided - zero out tokens and audio and mix together
+            tokens_empty = torch.zeros_like(tokens)
+            audio_empty = torch.zeros_like(audio)
+
+            # Inference
+            predicted_mix = self.forward(
+                condition_text = [torch.zeros_like(tokens), tokens], 
+                condition_audio = [torch.zeros_like(audio), masked_audio], 
+                noisy_audio = [z, z], 
+                times = [t, t]
+            )
+            predicted_conditioned = predicted_mix[1]
+            predicted_unconditioned = predicted_mix[0]
+            
+            # CFG prediction
+
+            # There are different ways to do CFG, this is my very naive version, which worked for me:
+            # prediction = (1 + alpha) * predicted_conditioned - alpha * predicted_unconditioned
+
+            # Original paper uses a different one, but i found that it simply creates overexposed values
+            # prediction = predicted_unconditioned + (predicted_conditioned - predicted_unconditioned) * alpha
+
+            # This is from the latest paper that rescales original formula (https://arxiv.org/abs/2305.08891):
+            prediction = predicted_conditioned + (predicted_conditioned - predicted_unconditioned) * alpha
+            prediction_rescaled = predicted_conditioned.std() * (prediction / prediction.std())
+
+            return prediction
+
+
+        trajectory = odeint(solver, noise, times, atol = 1e-5, rtol = 1e-5, method = 'midpoint')
+
+        #
+        # Output predicted interval
+        #
+
+        return trajectory[-1][interval[0]: interval[1]]
+
+    def forward(self, *, condition_text, condition_audio, noisy_audio, times, intervals = None, target = None):
+        device = condition_text[0].device
+
+        # Check shapes
+        B = len(condition_text)
+        assert len(condition_audio) == B
+        assert len(noisy_audio) == B
+        assert len(times) == B
+        if target is not None:
+            assert intervals is not None
+            assert len(target) == B
+
+        # Calculate durations
+        durations = [c.shape[0] for c in condition_audio]
+
+        # Check inner shapes
+        for i in range(B):
+            assert len(condition_text[i].shape) == 1, condition_text[i].shape
+            assert len(condition_audio[i].shape) == 2, condition_audio[i].shape
+            assert len(noisy_audio[i].shape) == 2, condition_audio[i].shape
+            assert condition_text[i].shape[0] <= durations[i], condition_text[i].shape[0]
+            assert condition_audio[i].shape[0] == durations[i]
+            assert condition_audio[i].shape[1] == config.audio.n_mels
+            assert noisy_audio[i].shape[0] == durations[i]
+            assert noisy_audio[i].shape[1] == config.audio.n_mels
+            if target is not None:
+                assert len(intervals[i]) == 2
+                assert intervals[i][0] >= 0
+                assert intervals[i][1] <= durations[i]
+                assert intervals[i][0] <= intervals[i][1]
+                assert target[i].shape[0] == intervals[i][1] - intervals[i][0]
+                assert target[i].shape[1] == config.audio.n_mels
+
+        # Find max duration
+        max_duration = max(durations)
+
+        # Prepare inputs
+        inputs_text = []
+        inputs_audio = []
+        inputs_noisy = []
+        input_mask = []
+        for i in range(B):
+            
+            # Pad text and use 0 for padding and 1 for filler
+            t = condition_text[i] + 1
+            t = torch.nn.functional.pad(t, (1, durations[i] - t.shape[0]), "constant", 0) # Filer
+            t = torch.nn.functional.pad(t, (0, max_duration - t.shape[0]), "constant", 0) # Pad
+            inputs_text.append(t)
+            
+            # Pad audio and noise with simple zeros
+            inputs_audio.append(torch.nn.functional.pad(condition_audio[i], (0, 0, 0, max_duration - condition_audio[i].shape[0]), "constant", 0))
+            inputs_noisy.append(torch.nn.functional.pad(noisy_audio[i], (0, 0, 0, max_duration - noisy_audio[i].shape[0]), "constant", 0))
+
+            # Create loss mask
+            mask = torch.zeros(max_duration)
+            mask[intervals[i][0]: intervals[i][1]] = 1
+            input_mask.append(mask)
+
+        # Stack everything
+        inputs_text = torch.stack(inputs_text)
+        inputs_audio = torch.stack(inputs_audio)
+        inputs_noisy = torch.stack(inputs_noisy)
+        input_mask = torch.stack(input_mask)
+
+        # Cacluate condition
+        inputs_condition = inputs_audio + self.text_embedding(inputs_text)
+
+        # Run flow
+        return self.flow(
+            audio = inputs_condition,
+            noise = inputs_noisy,
+            times = times,
+            mask = input_mask,
+            target = target,
+            mask_loss = True
+        )
