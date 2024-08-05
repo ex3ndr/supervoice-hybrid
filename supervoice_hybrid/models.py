@@ -475,6 +475,8 @@ class SupervoiceVariant3(torch.nn.Module):
         inputs_audio = []
         inputs_noisy = []
         input_mask = []
+        if target is not None:
+            targets = []
         for i in range(B):
             
             # Pad text and use 0 for padding and 1 for filler
@@ -486,6 +488,8 @@ class SupervoiceVariant3(torch.nn.Module):
             # Pad audio and noise with simple zeros
             inputs_audio.append(torch.nn.functional.pad(condition_audio[i], (0, 0, 0, max_duration - condition_audio[i].shape[0]), "constant", 0))
             inputs_noisy.append(torch.nn.functional.pad(noisy_audio[i], (0, 0, 0, max_duration - noisy_audio[i].shape[0]), "constant", 0))
+            if target is not None:
+                targets.append(torch.nn.functional.pad(target[i], (0, 0, 0, max_duration - target[i].shape[0]), "constant", 0))
 
             # Create loss mask
             mask = torch.zeros(max_duration)
@@ -497,6 +501,8 @@ class SupervoiceVariant3(torch.nn.Module):
         inputs_audio = torch.stack(inputs_audio)
         inputs_noisy = torch.stack(inputs_noisy)
         input_mask = torch.stack(input_mask)
+        if target is not None:
+            targets = torch.stack(targets)
 
         # Cacluate condition
         inputs_condition = inputs_audio + self.text_embedding(inputs_text)
@@ -507,6 +513,6 @@ class SupervoiceVariant3(torch.nn.Module):
             noise = inputs_noisy,
             times = times,
             mask = input_mask,
-            target = target,
+            target = targets,
             mask_loss = True
         )
