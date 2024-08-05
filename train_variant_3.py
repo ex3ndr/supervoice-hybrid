@@ -27,12 +27,12 @@ from train.dataset import load_spec_sampler, create_async_loader
 
 # Experiment
 train_experiment = "var3-1"
-train_project="hybrid-var2"
+train_project="hybrid-var3"
 train_auto_resume = True
 
 # Training schedule and parameters
-train_target_batch_size = 1 # Just single GPU
-train_batch_size = 12
+train_target_batch_size = 8
+train_batch_size = 2
 train_mixed_precision = "fp16" # "bf16" or "fp16" or None
 train_clip_grad_norm = 1 # Common reproductions are using 100 or 1
 train_lr_start = 1e-12
@@ -102,11 +102,11 @@ def do_train(accelerator, model, inputs):
 
         # Append
         condition_text.append(text.to(device, non_blocking=True))
-        condition_audio.append(audio.to(device, non_blocking=True))
-        noisy_audio.append(noisy.to(device, non_blocking=True))
+        condition_audio.append(audio.to(torch.float16).to(device, non_blocking=True))
+        noisy_audio.append(noisy.to(torch.float16).to(device, non_blocking=True))
         intervals.append([interval_start, interval_end])
         times.append(torch.tensor(time).to(device, non_blocking=True))
-        target.append(target_flow[interval_start:interval_end,:].to(device, non_blocking=True))
+        target.append(target_flow[interval_start:interval_end,:].to(torch.float16).to(device, non_blocking=True))
 
     # Forward
     _, loss = model(
@@ -133,7 +133,7 @@ def main():
     print(f"Running with gradient accumulation every {train_grad_accum_every}")
 
     # Prepare accelerator
-    ddp_kwargs = DistributedDataParallelKwargs()
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs], gradient_accumulation_steps = train_grad_accum_every, mixed_precision=train_mixed_precision)
     device = accelerator.device
     output_dir = Path("./output")
@@ -231,6 +231,7 @@ def main():
             lr = scheduler.get_last_lr()[0] / accelerator.num_processes
 
         # Load batch
+        last_loss = 0
         for _ in range(train_grad_accum_every):
             with accelerator.accumulate(model):
                 
@@ -256,8 +257,12 @@ def main():
                         accelerator.print("Step was skipped")
                         if torch.isnan(loss):
                             raise ValueError("Loss is NaN")
+
+                # Cleanup
+                last_loss = loss.detach().cpu().item()
+                del loss
         
-        return loss * train_grad_accum_every, lr
+        return last_loss * train_grad_accum_every, lr
 
     #
     # Start Training

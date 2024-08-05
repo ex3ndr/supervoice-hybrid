@@ -363,6 +363,7 @@ class SupervoiceVariant3(torch.nn.Module):
     def __init__(self, flow):
         super().__init__()
         self.flow = flow
+        self.flow.transformer.cache_alibi = False
         self.text_embedding = torch.nn.Embedding(8 * 1024 + 1, 100)
         torch.nn.init.normal_(self.text_embedding.weight, mean=0.0, std=0.02)
 
@@ -474,8 +475,10 @@ class SupervoiceVariant3(torch.nn.Module):
         inputs_text = []
         inputs_audio = []
         inputs_noisy = []
-        input_mask = []
+        input_mask = None
+        targets = None
         if target is not None:
+            input_mask = []
             targets = []
         for i in range(B):
             
@@ -488,20 +491,24 @@ class SupervoiceVariant3(torch.nn.Module):
             # Pad audio and noise with simple zeros
             inputs_audio.append(torch.nn.functional.pad(condition_audio[i], (0, 0, 0, max_duration - condition_audio[i].shape[0]), "constant", 0))
             inputs_noisy.append(torch.nn.functional.pad(noisy_audio[i], (0, 0, 0, max_duration - noisy_audio[i].shape[0]), "constant", 0))
+            
+            # For loss
             if target is not None:
+
+                # Create target
                 targets.append(torch.nn.functional.pad(target[i], (0, 0, 0, max_duration - target[i].shape[0]), "constant", 0))
 
-            # Create loss mask
-            mask = torch.zeros(max_duration, device = device, dtype = torch.bool)
-            mask[intervals[i][0]: intervals[i][1]] = 1
-            input_mask.append(mask)
+                # Create loss mask
+                mask = torch.zeros(max_duration, device = device, dtype = torch.bool)
+                mask[intervals[i][0]: intervals[i][1]] = 1
+                input_mask.append(mask)
 
         # Stack everything
         inputs_text = torch.stack(inputs_text)
         inputs_audio = torch.stack(inputs_audio)
         inputs_noisy = torch.stack(inputs_noisy)
-        input_mask = torch.stack(input_mask)
         if target is not None:
+            input_mask = torch.stack(input_mask)
             targets = torch.stack(targets)
 
         # Cacluate condition
