@@ -3,6 +3,7 @@ from .transformer import Transformer
 from .config import config
 from .tensors import LearnedSinusoidalPosEmb
 from xformers.ops import fmha
+from torchdiffeq import odeint
 
 class SupervoceVariant1(torch.nn.Module):
     def __init__(self):
@@ -178,16 +179,84 @@ class SupervoiceVariant2(torch.nn.Module):
         # Prediction
         self.prediction = torch.nn.Linear(self.n_dim, config.audio.n_mels)
 
-    def forward(self, *, condition_text, condition_audio, noisy_audio, intervals, times, target = None):
+    def sample(self, *, tokens, audio, interval, steps, alpha = None):
+        
+        #
+        # Prepare
+        #
+
+        # Mask out audio
+        masked_audio = audio.clone()
+        masked_audio[interval[0]: interval[1]] = 0
+
+        # Create noise
+        noise = torch.randn_like(audio)
+
+        # Create time interpolation
+        times = torch.linspace(0, 1, steps, device = audio.device)
+
+        #
+        # Solver
+        #
+
+        def solver(t, z):
+
+            # If alpha is not provided
+            if alpha is None:
+                return self.forward(
+                    condition_text = [tokens], 
+                    condition_audio = [masked_audio], 
+                    noisy_audio = [z], 
+                    times = [t],
+                )[0]
+
+            # If alpha is provided - zero out tokens and audio and mix together
+            tokens_empty = torch.zeros_like(tokens)
+            audio_empty = torch.zeros_like(audio)
+
+            # Inference
+            predicted_mix = self.forward(
+                condition_text = [torch.zeros_like(tokens), tokens], 
+                condition_audio = [torch.zeros_like(audio), masked_audio], 
+                noisy_audio = [z, z], 
+                times = [t, t]
+            )
+            predicted_conditioned = predicted_mix[1]
+            predicted_unconditioned = predicted_mix[0]
+            
+            # CFG prediction
+
+            # There are different ways to do CFG, this is my very naive version, which worked for me:
+            # prediction = (1 + alpha) * predicted_conditioned - alpha * predicted_unconditioned
+
+            # Original paper uses a different one, but i found that it simply creates overexposed values
+            # prediction = predicted_unconditioned + (predicted_conditioned - predicted_unconditioned) * alpha
+
+            # This is from the latest paper that rescales original formula (https://arxiv.org/abs/2305.08891):
+            prediction = predicted_conditioned + (predicted_conditioned - predicted_unconditioned) * alpha
+            prediction_rescaled = predicted_conditioned.std() * (prediction / prediction.std())
+
+            return prediction
+
+
+        trajectory = odeint(solver, noise, times, atol = 1e-5, rtol = 1e-5, method = 'midpoint')
+
+        #
+        # Output predicted interval
+        #
+
+        return trajectory[-1][interval[0]: interval[1]]
+
+    def forward(self, *, condition_text, condition_audio, noisy_audio, times, intervals = None, target = None):
         device = condition_text[0].device
 
         # Check shapes
         B = len(condition_text)
         assert len(condition_audio) == B
         assert len(noisy_audio) == B
-        assert len(intervals) == B
         assert len(times) == B
         if target is not None:
+            assert intervals is not None
             assert len(target) == B
 
         # Calculate durations
@@ -203,11 +272,11 @@ class SupervoiceVariant2(torch.nn.Module):
             assert condition_audio[i].shape[1] == config.audio.n_mels
             assert noisy_audio[i].shape[0] == durations[i]
             assert noisy_audio[i].shape[1] == config.audio.n_mels
-            assert len(intervals[i]) == 2
-            assert intervals[i][0] >= 0
-            assert intervals[i][1] <= durations[i]
-            assert intervals[i][0] <= intervals[i][1]
             if target is not None:
+                assert len(intervals[i]) == 2
+                assert intervals[i][0] >= 0
+                assert intervals[i][1] <= durations[i]
+                assert intervals[i][0] <= intervals[i][1]
                 assert target[i].shape[0] == intervals[i][1] - intervals[i][0]
                 assert target[i].shape[1] == config.audio.n_mels
 
@@ -261,18 +330,30 @@ class SupervoiceVariant2(torch.nn.Module):
         x = self.prediction(x)
 
         # Split predictions
-        preds = []
+        outputs = []
         offset = 0
         for i in range(B):
-            preds.append(x[offset + intervals[i][0]: offset + intervals[i][1]])
+            outputs.append(x[offset: offset + durations[i]])
             offset += durations[i] + 1 # +1 for time embedding
 
         # Compute loss
         if target is not None:
+
+            # Compute target intervals
+            preds = []
+            offset = 0
+            for i in range(B):
+                preds.append(x[offset + intervals[i][0]: offset + intervals[i][1]])
+                offset += durations[i] + 1 # +1 for time embedding
+
+            # Compute loss
             target = torch.cat(target, dim = 0)
             predd_cat = torch.cat(preds, dim = 0)
             loss = torch.nn.functional.mse_loss(predd_cat, target)
-            loss = loss / target.shape[0] # Normalize by number of frames
-            return preds, loss
+
+            # Normalize by number of frames
+            loss = loss / target.shape[0]
+
+            return outputs, loss
         
-        return preds
+        return outputs
