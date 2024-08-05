@@ -492,7 +492,7 @@ class SupervoiceVariant3(torch.nn.Module):
                 targets.append(torch.nn.functional.pad(target[i], (0, 0, 0, max_duration - target[i].shape[0]), "constant", 0))
 
             # Create loss mask
-            mask = torch.zeros(max_duration)
+            mask = torch.zeros(max_duration, device = device, dtype = torch.bool)
             mask[intervals[i][0]: intervals[i][1]] = 1
             input_mask.append(mask)
 
